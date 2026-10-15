@@ -70,9 +70,9 @@ int main(void) {
     assert(fast.interval == 12 && fast.latency == 30 && fast.timeout == 400 && valid(fast));
     assert(idle.interval == IDLE_INT && idle.timeout == 400 && valid(idle));
     assert(idle.latency == EXPECTED_IDLE_LATENCY);
-    if (idle.latency < 30) {
+    if (idle.latency < CONFIG_ZMK_SPLIT_BLE_IDLE_LATENCY) {
         idle.latency++;
-        assert(!valid(idle)); /* The latency is the largest that fits. */
+        assert(!valid(idle)); /* Lowered only as far as needed to fit. */
     }
 
     peripherals[0] = (struct peripheral_slot){PERIPHERAL_SLOT_STATE_CONNECTED, &right};
@@ -108,6 +108,7 @@ SWEEP = r"""
 #define CONFIG_ZMK_SPLIT_BLE_PREF_INT 12
 #define CONFIG_ZMK_SPLIT_BLE_PREF_LATENCY 30
 #define CONFIG_ZMK_SPLIT_BLE_PREF_TIMEOUT 400
+#define CONFIG_ZMK_SPLIT_BLE_IDLE_LATENCY 30
 /* ACTUAL_PARAMS */
 int main(void) {
     /* Every legal interval (7.5 ms .. 4 s) gives parameters Bluetooth accepts. */
@@ -155,16 +156,25 @@ class SplitIdleIntervalTests(unittest.TestCase):
         return HARNESS.replace("/* ACTUAL_IDLE */", self.idle).replace(
             "/* ACTUAL_LISTENER */", self.listener)
 
-    def test_totem_idle_interval_keeps_full_latency(self):
-        # 60 ms: (1 + 30) * 60 ms * 2 = 3.72 s fits the 4 s timeout.
+    def test_totem_idle_interval_and_latency(self):
+        # Totem: 60 ms with latency 4, so the right half listens every 300 ms.
         _compile_and_run(self.harness(), "idle48",
-                         ["-DCONFIG_ZMK_SPLIT_BLE_IDLE_INT=48", "-DIDLE_INT=48",
+                         ["-DCONFIG_ZMK_SPLIT_BLE_IDLE_INT=48",
+                          "-DCONFIG_ZMK_SPLIT_BLE_IDLE_LATENCY=4", "-DIDLE_INT=48",
+                          "-DEXPECTED_IDLE_LATENCY=4"])
+
+    def test_idle_latency_kept_when_it_fits(self):
+        # 60 ms: (1 + 30) * 60 ms * 2 = 3.72 s fits the 4 s timeout.
+        _compile_and_run(self.harness(), "idle48l30",
+                         ["-DCONFIG_ZMK_SPLIT_BLE_IDLE_INT=48",
+                          "-DCONFIG_ZMK_SPLIT_BLE_IDLE_LATENCY=30", "-DIDLE_INT=48",
                           "-DEXPECTED_IDLE_LATENCY=30"])
 
     def test_slower_idle_interval_lowers_latency(self):
         # 100 ms: latency 30 would need 6.2 s; the largest that fits 4 s is 18.
         _compile_and_run(self.harness(), "idle80",
-                         ["-DCONFIG_ZMK_SPLIT_BLE_IDLE_INT=80", "-DIDLE_INT=80",
+                         ["-DCONFIG_ZMK_SPLIT_BLE_IDLE_INT=80",
+                          "-DCONFIG_ZMK_SPLIT_BLE_IDLE_LATENCY=30", "-DIDLE_INT=80",
                           "-DEXPECTED_IDLE_LATENCY=18"])
 
     def test_every_interval_gives_valid_parameters(self):

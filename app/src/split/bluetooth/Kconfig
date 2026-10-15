@@ -87,6 +87,18 @@ config ZMK_SPLIT_BLE_IDLE_INT
       If the latency would not fit the supervision timeout at this interval,
       the latency is lowered. 0 keeps CONFIG_ZMK_SPLIT_BLE_PREF_INT always.
 
+config ZMK_SPLIT_BLE_IDLE_LATENCY
+    int "Peripheral latency for the split connection while the keyboard is idle"
+    depends on ZMK_SPLIT_BLE_IDLE_INT > 0
+    default ZMK_SPLIT_BLE_PREF_LATENCY
+    help
+      Connection events the peripheral may sleep through at the idle interval.
+      A long sleep before the switch back to the fast interval can lose the
+      link (seen with the Zephyr controller at 60 ms and latency 30: the link
+      dropped right after most switches back). A small value keeps the
+      peripheral listening often enough while still saving the central's power,
+      which does not depend on the latency.
+
 endif # ZMK_SPLIT_ROLE_CENTRAL
 
 if !ZMK_SPLIT_ROLE_CENTRAL

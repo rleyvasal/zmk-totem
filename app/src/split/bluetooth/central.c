@@ -1049,7 +1049,7 @@ struct split_conn_params {
 static struct split_conn_params split_conn_params_for(bool idle) {
     struct split_conn_params p = {
         .interval = idle ? CONFIG_ZMK_SPLIT_BLE_IDLE_INT : CONFIG_ZMK_SPLIT_BLE_PREF_INT,
-        .latency = CONFIG_ZMK_SPLIT_BLE_PREF_LATENCY,
+        .latency = idle ? CONFIG_ZMK_SPLIT_BLE_IDLE_LATENCY : CONFIG_ZMK_SPLIT_BLE_PREF_LATENCY,
         .timeout = CONFIG_ZMK_SPLIT_BLE_PREF_TIMEOUT,
     };
 
