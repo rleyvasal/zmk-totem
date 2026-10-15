@@ -435,6 +435,8 @@ static void passkey_display(struct bt_conn *conn, unsigned int passkey) {
     LOG_DBG("Passkey: %06u", passkey);
 }
 
+static void auth_cancel(struct bt_conn *conn) { LOG_DBG("Pairing cancelled"); }
+
 static void do_disconnect_of_active(struct k_work *work) {
     bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
     if (clear_bond_on_disconnect) {
@@ -492,8 +494,10 @@ struct bt_conn_auth_info_cb auth_info_cb = {
     .pairing_complete = pairing_complete,
 };
 
+/* Zephyr rejects display callbacks without a cancel callback (-EINVAL). */
 struct bt_conn_auth_cb auth_cb = {
     .passkey_display = passkey_display,
+    .cancel = auth_cancel,
 };
 
 int main(void) {

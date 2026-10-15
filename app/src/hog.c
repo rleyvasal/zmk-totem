@@ -288,8 +288,8 @@ BT_GATT_SERVICE_DEFINE(
     /* Keep the standard write handler: Zephyr identifies managed CCCs by its
      * function pointer for persistence, identity resolution and reconnects. */
     BT_GATT_CCC_MANAGED(((struct _bt_gatt_ccc[]){BT_GATT_CCC_INITIALIZER(
-        input_ccc_changed, keyboard_ccc_cfg_write, NULL)}),
-        BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
+                            input_ccc_changed, keyboard_ccc_cfg_write, NULL)}),
+                        BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
     BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ_ENCRYPT, read_hids_report_ref,
                        NULL, &input),
 
