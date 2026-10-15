@@ -402,6 +402,17 @@ config ZMK_BATTERY_REPORTING_FETCH_MODE_LITHIUM_VOLTAGE
 
 endchoice
 
+config ZMK_BATTERY_CHARGE_STATUS
+    bool "Report charging in the BAS Battery Level Status characteristic"
+    depends on BT_BAS
+    select BT_BAS_BLS
+    help
+      Publish the Battery Level Status characteristic (0x2BED) next to the
+      battery level. Its charge state is "charging" while the half has VBUS
+      (USB power) and "discharging" otherwise. On a split central that proxies
+      peripheral battery levels, it carries the peripheral's charge state
+      instead, and the central subscribes to the peripheral's status.
+
 endif # ZMK_BATTERY_REPORTING
 
 config ZMK_IDLE_TIMEOUT
@@ -658,7 +669,7 @@ if ZMK_LOW_PRIORITY_WORK_QUEUE
 
 config ZMK_LOW_PRIORITY_THREAD_STACK_SIZE
     int "Low priority thread stack size"
-    default 1536 if ZMK_BATTERY_REPORTING && SETTINGS && ZMK_USB
+    default 1536 if ZMK_BATTERY_REPORTING && SETTINGS && (ZMK_USB || ZMK_BATTERY_CHARGE_STATUS)
     default 768
     help
       Battery persistence uses this queue on USB keyboards. Allow room for

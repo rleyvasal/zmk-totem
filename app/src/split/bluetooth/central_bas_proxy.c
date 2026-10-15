@@ -132,6 +132,21 @@ int peripheral_batt_lvl_listener(const zmk_event_t *eh) {
     }
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+    /* The primary BAS carries the right half, so its Battery Level Status
+     * (0x2BED, next to that 2A19) carries the right half's charge state. */
+    const struct zmk_peripheral_battery_charging_changed *charging_ev =
+        as_zmk_peripheral_battery_charging_changed(eh);
+
+    if (charging_ev != NULL) {
+        LOG_DBG("Right charging for host BAS: %d", charging_ev->charging);
+        bt_bas_bls_set_battery_charge_state(charging_ev->charging
+                                                ? BT_BAS_BLS_CHARGE_STATE_CHARGING
+                                                : BT_BAS_BLS_CHARGE_STATE_DISCHARGING_ACTIVE);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+#endif
+
     const struct zmk_peripheral_battery_state_changed *ev =
         as_zmk_peripheral_battery_state_changed(eh);
 
@@ -170,6 +185,9 @@ int peripheral_batt_lvl_listener(const zmk_event_t *eh) {
 ZMK_LISTENER(peripheral_batt_lvl_listener, peripheral_batt_lvl_listener);
 ZMK_SUBSCRIPTION(peripheral_batt_lvl_listener, zmk_peripheral_battery_state_changed);
 ZMK_SUBSCRIPTION(peripheral_batt_lvl_listener, zmk_battery_state_changed);
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+ZMK_SUBSCRIPTION(peripheral_batt_lvl_listener, zmk_peripheral_battery_charging_changed);
+#endif
 #if IS_ENABLED(CONFIG_ZMK_USB)
 ZMK_SUBSCRIPTION(peripheral_batt_lvl_listener, zmk_usb_conn_state_changed);
 #endif

@@ -33,6 +33,18 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <hal/nrf_power.h>
 #endif
 
+/* This half publishes its own level in the BAS (not a split central's proxy). */
+#define OWN_BAS                                                                                    \
+    (IS_ENABLED(CONFIG_BT_BAS) && !IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_PROXY))
+
+/* Halves without ZMK_USB get no USB events, so poll VBUS detect for the charge state. */
+#if defined(NRF_POWER_HAS_USBREG) && NRF_POWER_HAS_USBREG && !IS_ENABLED(CONFIG_ZMK_USB) &&        \
+    OWN_BAS && IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+#define POLL_VBUS 1
+#else
+#define POLL_VBUS 0
+#endif
+
 static uint8_t last_state_of_charge = 0;
 static uint8_t last_cell_soc;
 static bool have_last_cell;
@@ -101,6 +113,33 @@ static int batt_settings_set(const char *name, size_t len, settings_read_cb read
 
 SETTINGS_STATIC_HANDLER_DEFINE(zmk_batt, "zmk/batt", NULL, batt_settings_set, NULL, NULL);
 #endif
+
+#if OWN_BAS
+/* VBUS holds the cell at charge voltage, and lithium_ion_mv_to_pct maps
+ * >= 4200 mV to 100%. Publish the last on-battery level instead while it is
+ * present; with none known yet, the live reading is all there is. */
+static uint8_t own_bas_level(bool vbus) {
+    if (vbus && have_last_cell) {
+        return last_cell_soc;
+    }
+    return last_state_of_charge;
+}
+
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+static int published_charge_state = -1;
+
+static void publish_charge_state(bool vbus) {
+    int state =
+        vbus ? BT_BAS_BLS_CHARGE_STATE_CHARGING : BT_BAS_BLS_CHARGE_STATE_DISCHARGING_ACTIVE;
+
+    /* Each set notifies and indicates, so only send changes. */
+    if (state != published_charge_state) {
+        published_charge_state = state;
+        bt_bas_bls_set_battery_charge_state(state);
+    }
+}
+#endif
+#endif // OWN_BAS
 
 #if DT_HAS_CHOSEN(zmk_battery)
 static const struct device *const battery = DEVICE_DT_GET(DT_CHOSEN(zmk_battery));
@@ -181,18 +220,17 @@ static int zmk_battery_update(const struct device *battery) {
     }
     remember_cell_soc(last_state_of_charge);
 
-#if IS_ENABLED(CONFIG_BT_BAS) && !IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_PROXY)
-#if IS_ENABLED(CONFIG_ZMK_USB)
-    /* USB holds the cell at charge voltage; lithium_ion_mv_to_pct maps
-     * >= 4200 mV to 100%. Do not publish that as the host-facing SoC. */
-    if (vbus_present()) {
-        /* leave BAS at the last on-battery sample */
-    } else
-#endif
-        if (bt_bas_get_battery_level() != last_state_of_charge) {
-        LOG_DBG("Setting BAS GATT battery level to %d.", last_state_of_charge);
+#if OWN_BAS
+    bool vbus = vbus_present();
+    uint8_t bas_level = own_bas_level(vbus);
 
-        rc = bt_bas_set_battery_level(last_state_of_charge);
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+    publish_charge_state(vbus);
+#endif
+    if (bt_bas_get_battery_level() != bas_level) {
+        LOG_DBG("Setting BAS GATT battery level to %d.", bas_level);
+
+        rc = bt_bas_set_battery_level(bas_level);
 
         if (rc != 0) {
             LOG_WRN("Failed to set BAS GATT battery level (err %d)", rc);
@@ -220,6 +258,33 @@ static void zmk_battery_timer(struct k_timer *timer) {
 
 K_TIMER_DEFINE(battery_timer, zmk_battery_timer, NULL);
 
+#if POLL_VBUS
+#define VBUS_POLL_INTERVAL K_SECONDS(2)
+
+static bool polled_vbus;
+
+/* Runs in the timer ISR; the register read is cheap. On a change, take a
+ * sample now so the BAS level freezes and the charge state follows within one
+ * poll, not one battery report interval. */
+static void vbus_poll(struct k_timer *timer) {
+    bool vbus = nrf_power_usbregstatus_vbusdet_get(NRF_POWER);
+
+    if (vbus == polled_vbus) {
+        return;
+    }
+    polled_vbus = vbus;
+    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &battery_work);
+#if IS_ENABLED(CONFIG_SETTINGS)
+    if (vbus) {
+        /* Keep the on-battery level across a reboot while plugged in. */
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &persist_cell_soc_work);
+    }
+#endif
+}
+
+K_TIMER_DEFINE(vbus_timer, vbus_poll, NULL);
+#endif // POLL_VBUS
+
 static void zmk_battery_start_reporting() {
     if (device_is_ready(battery)) {
         k_timer_start(&battery_timer, K_NO_WAIT, K_SECONDS(CONFIG_ZMK_BATTERY_REPORT_INTERVAL));
@@ -243,6 +308,11 @@ static int zmk_battery_init(void) {
     }
 
     zmk_battery_start_reporting();
+#if POLL_VBUS
+    /* The first sample already sees the boot state; poll for later changes. */
+    polled_vbus = nrf_power_usbregstatus_vbusdet_get(NRF_POWER);
+    k_timer_start(&vbus_timer, VBUS_POLL_INTERVAL, VBUS_POLL_INTERVAL);
+#endif
     return 0;
 }
 

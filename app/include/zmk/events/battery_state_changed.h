@@ -23,3 +23,10 @@ struct zmk_peripheral_battery_state_changed {
 };
 
 ZMK_EVENT_DECLARE(zmk_peripheral_battery_state_changed);
+
+struct zmk_peripheral_battery_charging_changed {
+    uint8_t source;
+    bool charging;
+};
+
+ZMK_EVENT_DECLARE(zmk_peripheral_battery_charging_changed);
