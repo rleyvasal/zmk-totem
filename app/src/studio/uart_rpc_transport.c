@@ -22,7 +22,6 @@ LOG_MODULE_DECLARE(zmk_studio, CONFIG_ZMK_STUDIO_LOG_LEVEL);
 #define UART_DEVICE_NODE DT_CHOSEN(zmk_studio_rpc_uart)
 
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
-static bool uart_host_open;
 
 void zmk_studio_uart_rearm(void) {
     if (!device_is_ready(uart_dev)) {
@@ -35,8 +34,6 @@ void zmk_studio_uart_rearm(void) {
     uart_irq_rx_enable(uart_dev);
 #endif
 }
-
-bool zmk_studio_uart_host_open(void) { return uart_host_open; }
 
 static void tx_notify(struct ring_buf *tx_ring_buf, size_t written, bool msg_done,
                       void *user_data) {
@@ -128,9 +125,6 @@ static void serial_cb(const struct device *dev, void *user_data) {
                 last_read = uart_fifo_read(uart_dev, buffer, len);
 
                 ring_buf_put_finish(buf, last_read);
-                if (last_read) {
-                    uart_host_open = true;
-                }
             } else {
                 LOG_ERR("Dropping incoming RPC byte, insufficient room in the RX buffer. Bump "
                         "CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE.");
@@ -154,15 +148,17 @@ static void serial_cb(const struct device *dev, void *user_data) {
             }
 
             int sent = uart_fifo_fill(uart_dev, buf, claim_len);
+
             if (sent <= 0) {
-                /* CDC ring full or host not polling — do not spin the USB workqueue. */
+                /* The host isn't draining the port; retry on the next TX-ready interrupt. */
                 ring_buf_get_finish(tx_buf, 0);
                 break;
             }
 
             ring_buf_get_finish(tx_buf, sent);
         }
-        if (ring_buf_size_get(tx_buf) == 0) {
+
+        if (ring_buf_is_empty(tx_buf)) {
             uart_irq_tx_disable(uart_dev);
         }
     }

@@ -89,20 +89,35 @@ struct ring_buf *zmk_rpc_get_rx_buf(void) { return &rpc_rx_buf; }
 
 void zmk_rpc_rx_notify(void) { k_sem_give(&rpc_rx_sem); }
 
-/* Weak: totem_studio_log.c handles 'C' USB log on/off frames. */
-__attribute__((weak)) void zmk_studio_control_payload(const uint8_t *payload, size_t len) {
-    ARG_UNUSED(payload);
-    ARG_UNUSED(len);
+/* Host-to-device raw frame state. A frame is raw when its first payload byte is a registered
+ * prefix; its bytes are collected here instead of being handed to the protobuf decoder. */
+static bool rpc_frame_started;
+static bool rpc_raw_frame;
+static uint8_t rpc_raw_buf[ZMK_RPC_RAW_FRAME_RX_MAX];
+static size_t rpc_raw_len;
+
+static bool is_raw_frame_prefix(uint8_t b) {
+    if (!ZMK_RPC_RAW_FRAME_PREFIX_VALID(b)) {
+        return false;
+    }
+    STRUCT_SECTION_FOREACH(zmk_rpc_raw_frame_handler, handler) {
+        if (handler->prefix == b) {
+            return true;
+        }
+    }
+    return false;
 }
 
-#define STUDIO_CTL_PREFIX ((uint8_t)'C')
-#define STUDIO_DIAG_PREFIX ((uint8_t)'D')
+static void dispatch_raw_frame(void) {
+    STRUCT_SECTION_FOREACH(zmk_rpc_raw_frame_handler, handler) {
+        if (handler->prefix == rpc_raw_buf[0]) {
+            handler->func(rpc_raw_buf, rpc_raw_len);
+        }
+    }
+}
 
 static bool rpc_read_cb(pb_istream_t *stream, uint8_t *buf, size_t count) {
     uint32_t write_offset = 0;
-    static bool ctl_frame;
-    static uint8_t ctl_buf[8];
-    static uint8_t ctl_len;
 
     do {
         uint8_t *buffer;
@@ -111,14 +126,14 @@ static bool rpc_read_cb(pb_istream_t *stream, uint8_t *buf, size_t count) {
         if (len > 0) {
             for (int i = 0; i < len; i++) {
                 if (studio_framing_process_byte(&rpc_framing_state, buffer[i])) {
-                    if (!ctl_frame && write_offset == 0 &&
-                        (buffer[i] == STUDIO_CTL_PREFIX || buffer[i] == STUDIO_DIAG_PREFIX)) {
-                        ctl_frame = true;
-                        ctl_len = 0;
+                    if (!rpc_frame_started) {
+                        rpc_frame_started = true;
+                        rpc_raw_frame = is_raw_frame_prefix(buffer[i]);
+                        rpc_raw_len = 0;
                     }
-                    if (ctl_frame) {
-                        if (ctl_len < sizeof(ctl_buf)) {
-                            ctl_buf[ctl_len++] = buffer[i];
+                    if (rpc_raw_frame) {
+                        if (rpc_raw_len < sizeof(rpc_raw_buf)) {
+                            rpc_raw_buf[rpc_raw_len++] = buffer[i];
                         }
                     } else {
                         buf[write_offset++] = buffer[i];
@@ -133,11 +148,6 @@ static bool rpc_read_cb(pb_istream_t *stream, uint8_t *buf, size_t count) {
     } while (write_offset < count && rpc_framing_state != FRAMING_STATE_EOF);
 
     if (rpc_framing_state == FRAMING_STATE_EOF) {
-        if (ctl_frame) {
-            zmk_studio_control_payload(ctl_buf, ctl_len);
-            ctl_frame = false;
-            ctl_len = 0;
-        }
         stream->bytes_left = 0;
         return false;
     } else {
@@ -214,6 +224,7 @@ static pb_ostream_t pb_ostream_for_tx_buf(void *user_data) {
 
 static int send_response(const zmk_studio_Response *resp) {
     int ret = 0;
+
     k_mutex_lock(&rpc_transport_mutex, K_FOREVER);
 
     if (!selected_transport) {
@@ -250,14 +261,18 @@ exit:
     return ret;
 }
 
-int zmk_rpc_tx_raw_payload(const uint8_t *payload, size_t len) {
+static bool needs_escape(uint8_t b) {
+    return b == FRAMING_SOF || b == FRAMING_ESC || b == FRAMING_EOF;
+}
+
+int zmk_rpc_send_raw_frame(const uint8_t *payload, size_t len) {
     int ret = 0;
 
-    if (!payload || len == 0) {
+    if (!payload || len == 0 || !ZMK_RPC_RAW_FRAME_PREFIX_VALID(payload[0])) {
         return -EINVAL;
     }
 
-    /* Diagnostic traffic must never stall the workqueue used by Bluetooth. */
+    /* Raw frames are best-effort side traffic; never wait behind an RPC response. */
     if (k_mutex_lock(&rpc_transport_mutex, K_NO_WAIT) != 0) {
         return -EAGAIN;
     }
@@ -267,23 +282,20 @@ int zmk_rpc_tx_raw_payload(const uint8_t *payload, size_t len) {
         goto exit_raw;
     }
 
-    size_t capacity = ring_buf_capacity_get(&rpc_tx_buf);
-    if (len > capacity - 2) {
-        ret = -EMSGSIZE;
-        goto exit_raw;
-    }
     size_t frame_len = len + 2;
     for (size_t i = 0; i < len; i++) {
-        if (payload[i] == FRAMING_SOF || payload[i] == FRAMING_ESC || payload[i] == FRAMING_EOF) {
+        if (needs_escape(payload[i])) {
             frame_len++;
         }
     }
-    if (frame_len > capacity) {
+
+    if (frame_len > ring_buf_capacity_get(&rpc_tx_buf)) {
         ret = -EMSGSIZE;
         goto exit_raw;
     }
-    /* Check the complete escaped frame before writing anything. Other
-     * producers hold this mutex; the UART consumer can only free space. */
+
+    /* All producers hold the mutex and the transport only frees space, so a frame that fits now
+     * is written whole and never interleaves with an RPC response. */
     if (frame_len > ring_buf_space_get(&rpc_tx_buf)) {
         ret = -EAGAIN;
         goto exit_raw;
@@ -292,7 +304,7 @@ int zmk_rpc_tx_raw_payload(const uint8_t *payload, size_t len) {
     uint8_t framing_byte = FRAMING_SOF;
     ring_buf_put(&rpc_tx_buf, &framing_byte, 1);
     for (size_t i = 0; i < len; i++) {
-        if (payload[i] == FRAMING_SOF || payload[i] == FRAMING_ESC || payload[i] == FRAMING_EOF) {
+        if (needs_escape(payload[i])) {
             framing_byte = FRAMING_ESC;
             ring_buf_put(&rpc_tx_buf, &framing_byte, 1);
         }
@@ -300,6 +312,7 @@ int zmk_rpc_tx_raw_payload(const uint8_t *payload, size_t len) {
     }
     framing_byte = FRAMING_EOF;
     ring_buf_put(&rpc_tx_buf, &framing_byte, 1);
+
     void *user_data = selected_transport->tx_user_data ? selected_transport->tx_user_data() : NULL;
     selected_transport->tx_notify(&rpc_tx_buf, frame_len, true, user_data);
 
@@ -318,8 +331,12 @@ static void rpc_main(void) {
         bool status = pb_decode(&stream, &zmk_studio_Request_msg, &req);
 
         rpc_framing_state = FRAMING_STATE_IDLE;
+        rpc_frame_started = false;
 
-        if (status) {
+        if (rpc_raw_frame) {
+            rpc_raw_frame = false;
+            dispatch_raw_frame();
+        } else if (status) {
             zmk_studio_Response resp = handle_request(&req);
 
             int err = send_response(&resp);

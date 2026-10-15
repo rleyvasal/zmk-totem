@@ -6,6 +6,7 @@ zephyr_linker_sources(SECTIONS ../../include/linker/zmk-rpc-subsystem-handlers.l
 zephyr_linker_sources(SECTIONS ../../include/linker/zmk-rpc-subsystem-settings-reset.ld)
 zephyr_linker_sources(SECTIONS ../../include/linker/zmk-rpc-event-mappers.ld)
 zephyr_linker_sources(SECTIONS ../../include/linker/zmk-rpc-transport.ld)
+zephyr_linker_sources(SECTIONS ../../include/linker/zmk-rpc-raw-frame-handlers.ld)
 
 target_sources(app PRIVATE msg_framing.c)
 target_sources(app PRIVATE rpc.c)
