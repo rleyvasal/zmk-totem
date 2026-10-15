@@ -26,4 +26,6 @@ jobs:
         run: python app/tests/battery/usb_boot/test_usb_boot.py -v
       - name: Test right-half charge state and level freeze on USB
         run: python app/tests/battery/charge_status/test_charge_status.py -v
+      - name: Test the idle split interval
+        run: python app/tests/split/idle_interval/test_idle_interval.py -v
       - uses: pre-commit/action@v3.0.1

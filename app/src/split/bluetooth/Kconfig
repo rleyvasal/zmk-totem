@@ -74,6 +74,19 @@ config ZMK_SPLIT_BLE_PREF_TIMEOUT
     int "Supervision timeout to use for split central/peripheral connection"
     default 400
 
+config ZMK_SPLIT_BLE_IDLE_INT
+    int "Connection interval for the split connection while the keyboard is idle"
+    default 0
+    help
+      Interval (in 1.25 ms units) to switch the split connections to when the
+      keyboard goes idle (CONFIG_ZMK_IDLE_TIMEOUT). The central sends on every
+      connection event, so a slower interval while nothing is typed saves most
+      of its split radio power. The first key press switches back to
+      CONFIG_ZMK_SPLIT_BLE_PREF_INT; until that takes effect (a few idle
+      intervals), keys from the peripheral arrive at the idle interval.
+      If the latency would not fit the supervision timeout at this interval,
+      the latency is lowered. 0 keeps CONFIG_ZMK_SPLIT_BLE_PREF_INT always.
+
 endif # ZMK_SPLIT_ROLE_CENTRAL
 
 if !ZMK_SPLIT_ROLE_CENTRAL
