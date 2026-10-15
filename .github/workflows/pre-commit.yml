@@ -22,4 +22,6 @@ jobs:
         run: python app/tests/settings/startup/test_settings_loaded.py -v
       - name: Test battery persistence during USB startup
         run: python app/tests/battery/persistence/test_persistence.py -v
+      - name: Test battery cell level after booting on USB
+        run: python app/tests/battery/usb_boot/test_usb_boot.py -v
       - uses: pre-commit/action@v3.0.1

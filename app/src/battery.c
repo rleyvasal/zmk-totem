@@ -29,6 +29,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #if IS_ENABLED(CONFIG_SETTINGS)
 #include <zephyr/settings/settings.h>
 #endif
+#if IS_ENABLED(CONFIG_HAS_NRFX)
+#include <hal/nrf_power.h>
+#endif
 
 static uint8_t last_state_of_charge = 0;
 static uint8_t last_cell_soc;
@@ -41,12 +44,27 @@ int zmk_battery_last_cell_soc(void) { return have_last_cell ? (int)last_cell_soc
 
 uint16_t zmk_battery_millivolts(void) { return last_millivolts; }
 
-static void remember_cell_soc(uint8_t soc) {
-#if IS_ENABLED(CONFIG_ZMK_USB)
-    if (zmk_usb_is_powered()) {
-        return;
+/* zmk_usb_is_powered() reads false until the USB stack reports its first
+ * status, which can come after the first battery sample at boot. Where the
+ * SoC has a USB regulator, read VBUS detect directly so a sample taken on USB
+ * is never mistaken for the cell level. */
+static bool vbus_present(void) {
+#if NRF_POWER_HAS_USBREG
+    if (nrf_power_usbregstatus_vbusdet_get(NRF_POWER)) {
+        return true;
     }
 #endif
+#if IS_ENABLED(CONFIG_ZMK_USB)
+    return zmk_usb_is_powered();
+#else
+    return false;
+#endif
+}
+
+static void remember_cell_soc(uint8_t soc) {
+    if (vbus_present()) {
+        return;
+    }
     last_cell_soc = soc;
     have_last_cell = true;
 }
@@ -167,7 +185,7 @@ static int zmk_battery_update(const struct device *battery) {
 #if IS_ENABLED(CONFIG_ZMK_USB)
     /* USB holds the cell at charge voltage; lithium_ion_mv_to_pct maps
      * >= 4200 mV to 100%. Do not publish that as the host-facing SoC. */
-    if (zmk_usb_is_powered()) {
+    if (vbus_present()) {
         /* leave BAS at the last on-battery sample */
     } else
 #endif
