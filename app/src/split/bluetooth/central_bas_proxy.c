@@ -41,22 +41,8 @@ static bool have_right;
 static int64_t last_left_ms;
 static int64_t last_right_ms;
 
-static bool left_on_usb(void) {
-#if IS_ENABLED(CONFIG_ZMK_USB)
-    return zmk_usb_is_powered();
-#else
-    return false;
-#endif
-}
-
-static uint8_t left_level_for_host(void) {
-    int cell = zmk_battery_last_cell_soc();
-
-    if (left_on_usb() && cell >= 0) {
-        return (uint8_t)cell;
-    }
-    return zmk_battery_state_of_charge();
-}
+/* Not the live reading: on USB that is charge voltage (see zmk_battery_reported_soc()). */
+static uint8_t left_level_for_host(void) { return zmk_battery_reported_soc(); }
 
 static bool should_publish(bool have, uint8_t last, uint8_t now, int64_t last_ms) {
     int64_t t = k_uptime_get();
@@ -139,10 +125,12 @@ int peripheral_batt_lvl_listener(const zmk_event_t *eh) {
         as_zmk_peripheral_battery_charging_changed(eh);
 
     if (charging_ev != NULL) {
-        LOG_DBG("Right charging for host BAS: %d", charging_ev->charging);
-        bt_bas_bls_set_battery_charge_state(charging_ev->charging
-                                                ? BT_BAS_BLS_CHARGE_STATE_CHARGING
-                                                : BT_BAS_BLS_CHARGE_STATE_DISCHARGING_ACTIVE);
+        LOG_DBG("Right charging for host BAS: %d full %d", charging_ev->charging,
+                charging_ev->full);
+        bt_bas_bls_set_battery_charge_state(
+            charging_ev->full       ? BT_BAS_BLS_CHARGE_STATE_DISCHARGING_INACTIVE
+            : charging_ev->charging ? BT_BAS_BLS_CHARGE_STATE_CHARGING
+                                    : BT_BAS_BLS_CHARGE_STATE_DISCHARGING_ACTIVE);
         return ZMK_EV_EVENT_BUBBLE;
     }
 #endif
@@ -170,9 +158,6 @@ int peripheral_batt_lvl_listener(const zmk_event_t *eh) {
     if (as_zmk_battery_state_changed(eh) != NULL) {
         uint8_t lvl = left_level_for_host();
 
-        if (left_on_usb()) {
-            return ZMK_EV_EVENT_BUBBLE;
-        }
         if (!should_publish(have_left_sent, last_left_sent, lvl, last_left_ms)) {
             return ZMK_EV_EVENT_BUBBLE;
         }

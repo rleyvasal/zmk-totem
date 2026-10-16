@@ -25,6 +25,24 @@ HARNESS = r"""
 #define LOG_DBG(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define CHARGE_CURRENT_UA 0
+#define BATTERY_CAPACITY_UAH 0
+#define SETTLE_AFTER_CHARGE_MS 0
+enum zmk_battery_charge_state {
+    ZMK_BATTERY_CHARGE_STATE_DISCHARGING,
+    ZMK_BATTERY_CHARGE_STATE_CHARGING,
+    ZMK_BATTERY_CHARGE_STATE_FULL,
+};
+static int64_t now_ms;
+static int64_t k_uptime_get(void) { return now_ms; }
+/* A charger status pin (asserted while charging), as on a XIAO. */
+#define HAS_CHARGER_STATUS 1
+struct gpio_dt_spec { int unused; };
+static const struct gpio_dt_spec charger_status;
+static bool charger_status_ready = true;
+static int charger_pin = 1;
+static int gpio_pin_get_dt(const struct gpio_dt_spec *spec) { (void)spec; return charger_pin; }
 typedef int NRF_POWER_Type;
 static NRF_POWER_Type power_regs;
 #define NRF_POWER (&power_regs)
@@ -75,14 +93,19 @@ static bool have_last_cell;
 /* ACTUAL_PARSER */
 static const struct device battery_dev;
 static void sample(int soc, bool vbus) {
+    now_ms += 60000;
     sampled_soc = soc; vbusdet = vbus;
     assert(zmk_battery_update(&battery_dev) == 0);
 }
-static int central_sees_charging(void) { return batt_status_charging(bls_value, sizeof(bls_value)); }
+static int central_sees_charging(void) {
+    return batt_status_charge_state(bls_value, sizeof(bls_value));
+}
 int main(void) {
     /* Malformed or short status values are rejected. */
-    assert(batt_status_charging(NULL, 3) == -EINVAL);
-    assert(batt_status_charging(bls_value, 2) == -EINVAL);
+    assert(batt_status_charge_state(NULL, 3) == -EINVAL);
+    assert(batt_status_charge_state(bls_value, 2) == -EINVAL);
+    (void)zmk_battery_charge_state;
+    (void)needs_samples;
     assert(central_sees_charging() == 0); /* Charge state unknown before the first sample. */
 
     /* On battery: the live level is published and remembered; discharging. */
@@ -99,14 +122,23 @@ int main(void) {
     assert(bls_sets == 2); /* Unchanged state: no new notification. */
     assert(bas_level == 64);
 
+    /* The charger reports the charge complete: 100, "discharging, inactive",
+     * which the central decodes as full. */
+    charger_pin = 0;
+    sample(100, true);
+    assert(bas_level == 100 && last_cell_soc == 100);
+    assert(((bls_value[1] >> 5) & 3) == BT_BAS_BLS_CHARGE_STATE_DISCHARGING_INACTIVE);
+    assert(bls_sets == 3 && central_sees_charging() == ZMK_BATTERY_CHARGE_STATE_FULL);
+    charger_pin = 1;
+
     /* Unplugged: live readings again, discharging. */
     sample(61, false);
     assert(bas_level == 61 && last_cell_soc == 61);
-    assert(bls_sets == 3 && central_sees_charging() == 0);
+    assert(bls_sets == 4 && central_sees_charging() == 0);
     assert((bls_value[1] & 0x1f) == 0x03 && bls_value[2] == 0x0E); /* Other bits untouched. */
 
     /* Booted on USB with no cell level known: the live reading is all there is. */
-    have_last_cell = false; last_state_of_charge = 0;
+    have_last_cell = false; last_state_of_charge = 0; prev_vbus = false;
     sample(99, true);
     assert(bas_level == 99 && !have_last_cell && central_sees_charging() == 1);
     return 0;
@@ -131,13 +163,16 @@ class ChargeStatusTests(unittest.TestCase):
                      "\n#if IS_ENABLED(CONFIG_SETTINGS)\nstatic void persist_cell_soc("))
         harness = harness.replace(
             "/* ACTUAL_OWN_BAS */",
-            _section(battery, "#if OWN_BAS\n/* VBUS holds", "#endif // OWN_BAS\n", True))
+            _section(battery, "#if OWN_BAS && IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)\n",
+                     "\n#if DT_HAS_CHOSEN(zmk_battery)\n"))
         harness = harness.replace(
             "/* ACTUAL_UPDATE */",
-            _section(battery, "static int zmk_battery_update(", "\nstatic void zmk_battery_work("))
+            _section(battery, "static int zmk_battery_update(",
+                     "\nstatic void stop_sampling_if_idle(void);"))
         harness = harness.replace(
             "/* ACTUAL_PARSER */",
-            _section(central, "static int batt_status_charging(", "\nstatic void report_batt_status("))
+            _section(central, "static int batt_status_charge_state(",
+                     "\nstatic void report_batt_status("))
         with tempfile.TemporaryDirectory() as directory:
             executable = str(Path(directory) / "test_charge_status")
             subprocess.run(

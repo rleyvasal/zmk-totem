@@ -25,7 +25,7 @@ struct k_work_q { int unused; };
 typedef int zmk_event_t;
 enum { ZMK_ACTIVITY_ACTIVE, ZMK_ACTIVITY_IDLE, ZMK_ACTIVITY_SLEEP };
 static bool powered, settings_locked, in_usb_event;
-static int saves, blocked_system_saves, battery_updates, timer_stops;
+static int saves, blocked_system_saves, sampling_starts, timer_stops;
 static uint8_t saved_soc;
 static struct k_work_q lowprio;
 static struct k_work *pending;
@@ -60,11 +60,11 @@ static const int *as_zmk_activity_state_changed(const int *event) {
     return *event == 2 ? event : NULL;
 }
 static int zmk_activity_get_state(void) { return ZMK_ACTIVITY_IDLE; }
-static void zmk_battery_start_reporting(void) { }
+static void zmk_battery_start_reporting(void) { sampling_starts++; }
 static int battery_timer;
 static void k_timer_stop(int *timer) { assert(timer == &battery_timer); timer_stops++; }
-static void update_battery(struct k_work *work) { (void)work; battery_updates++; }
-static K_WORK_DEFINE(battery_work, update_battery);
+/* On battery and not settling: idle may stop sampling. */
+static void stop_sampling_if_idle(void) { k_timer_stop(&battery_timer); }
 /* ACTUAL_PERSIST */
 /* ACTUAL_LISTENER */
 static void usb_event(void) {
@@ -112,7 +112,8 @@ int main(void) {
     powered = false;
     usb_event();
     drain_lowprio();
-    assert(battery_updates == 1 && saves == 2);
+    /* Every USB change samples at once (5 events), and a plug-in also saves. */
+    assert(sampling_starts == 5 && saves == 2);
     const int idle_event = 2;
     assert(battery_event_listener(&idle_event) == 0 && timer_stops == 1);
     return 0;

@@ -8,11 +8,29 @@
 
 #include <stdint.h>
 
+enum zmk_battery_charge_state {
+    /* On battery. */
+    ZMK_BATTERY_CHARGE_STATE_DISCHARGING,
+    /* On external power and charging (or no charger status to say otherwise). */
+    ZMK_BATTERY_CHARGE_STATE_CHARGING,
+    /* On external power and the charger reports the charge complete. */
+    ZMK_BATTERY_CHARGE_STATE_FULL,
+};
+
+/* Live reading of the last sample. On external power it reflects charge voltage. */
 uint8_t zmk_battery_state_of_charge(void);
 
-/* Last SoC sampled while this half was not on USB. -1 if never known.
- * Use this for host UI while USB is holding the divider at charge voltage. */
+/* Best known level of the cell, -1 if never known: the last reading on battery,
+ * then while charging an estimate (with a zmk,battery-charger current and
+ * capacity) or 100 once the charger reports full. */
 int zmk_battery_last_cell_soc(void);
+
+/* The level to show for this half: the live reading on battery, but the cell
+ * level while on external power and for CONFIG_ZMK_BATTERY_SETTLE_AFTER_CHARGE_SEC
+ * after it is removed. */
+uint8_t zmk_battery_reported_soc(void);
+
+enum zmk_battery_charge_state zmk_battery_charge_state(void);
 
 /* Last ADC millivolts (0 if not sampled yet). USB charge is typically >= 4200. */
 uint16_t zmk_battery_millivolts(void);

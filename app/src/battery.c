@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/bluetooth/services/bas.h>
 
 #include <zephyr/logging/log.h>
@@ -45,6 +46,22 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define POLL_VBUS 0
 #endif
 
+#if DT_HAS_CHOSEN(zmk_battery_charger)
+#define CHARGER_NODE DT_CHOSEN(zmk_battery_charger)
+#define CHARGE_CURRENT_UA DT_PROP_OR(CHARGER_NODE, charge_current_microamp, 0)
+#define BATTERY_CAPACITY_UAH DT_PROP_OR(CHARGER_NODE, charge_full_design_microamp_hours, 0)
+#if DT_NODE_HAS_PROP(CHARGER_NODE, status_gpios)
+#define HAS_CHARGER_STATUS 1
+static const struct gpio_dt_spec charger_status = GPIO_DT_SPEC_GET(CHARGER_NODE, status_gpios);
+static bool charger_status_ready;
+#endif
+#else
+#define CHARGE_CURRENT_UA 0
+#define BATTERY_CAPACITY_UAH 0
+#endif
+
+#define SETTLE_AFTER_CHARGE_MS ((int64_t)CONFIG_ZMK_BATTERY_SETTLE_AFTER_CHARGE_SEC * 1000)
+
 static uint8_t last_state_of_charge = 0;
 static uint8_t last_cell_soc;
 static bool have_last_cell;
@@ -73,13 +90,84 @@ static bool vbus_present(void) {
 #endif
 }
 
-static void remember_cell_soc(uint8_t soc) {
-    if (vbus_present()) {
+static enum zmk_battery_charge_state charge_state;
+static bool prev_vbus;
+static bool unplugged_seen;
+static int64_t unplugged_at;
+static int64_t charge_start_at;
+static int charge_start_soc = -1;
+
+/* Level after charging for elapsed_ms from start_soc at current_ua into a
+ * capacity_uah cell, or -1 if any of those is unknown. Held below 100 until
+ * the charger reports full: the current tapers off near the end, so the
+ * estimate runs ahead of the cell there. */
+static int charge_estimate(int start_soc, int64_t elapsed_ms, uint32_t current_ua,
+                           uint32_t capacity_uah) {
+    if (start_soc < 0 || current_ua == 0 || capacity_uah == 0 || elapsed_ms < 0) {
+        return -1;
+    }
+    /* percent = current * hours / capacity * 100 = current * ms / (capacity * 36000) */
+    int64_t gained = elapsed_ms * current_ua / ((int64_t)capacity_uah * 36000);
+    return (int)MIN(start_soc + gained, 99);
+}
+
+static bool settling(int64_t now) {
+    return SETTLE_AFTER_CHARGE_MS > 0 && unplugged_seen &&
+           now - unplugged_at < SETTLE_AFTER_CHARGE_MS;
+}
+
+/* Fold one sample into the cell level. charger: -1 without a status pin, 1
+ * charging, 0 charge complete. On external power the live reading is charge
+ * voltage, so it is never taken as the cell level. */
+static void track_cell_level(uint8_t live_soc, bool vbus, int charger, int64_t now) {
+    if (!vbus) {
+        if (prev_vbus) {
+            unplugged_seen = true;
+            unplugged_at = now;
+        }
+        prev_vbus = false;
+        charge_state = ZMK_BATTERY_CHARGE_STATE_DISCHARGING;
+        if (!settling(now)) {
+            last_cell_soc = live_soc;
+            have_last_cell = true;
+        }
         return;
     }
-    last_cell_soc = soc;
-    have_last_cell = true;
+
+    if (!prev_vbus || (charge_start_soc < 0 && have_last_cell)) {
+        /* Plugged in, or the persisted level arrived after the first sample. */
+        charge_start_at = now;
+        charge_start_soc = have_last_cell ? last_cell_soc : -1;
+    }
+    prev_vbus = true;
+
+    if (charger == 0) {
+        charge_state = ZMK_BATTERY_CHARGE_STATE_FULL;
+        last_cell_soc = 100;
+        have_last_cell = true;
+        return;
+    }
+    charge_state = ZMK_BATTERY_CHARGE_STATE_CHARGING;
+
+    int estimate = charge_estimate(charge_start_soc, now - charge_start_at, CHARGE_CURRENT_UA,
+                                   BATTERY_CAPACITY_UAH);
+    if (estimate > (have_last_cell ? last_cell_soc : -1)) {
+        last_cell_soc = estimate;
+        have_last_cell = true;
+    }
 }
+
+uint8_t zmk_battery_reported_soc(void) {
+    bool held = prev_vbus || settling(k_uptime_get());
+
+    return (held && have_last_cell) ? last_cell_soc : last_state_of_charge;
+}
+
+enum zmk_battery_charge_state zmk_battery_charge_state(void) { return charge_state; }
+
+/* Idle normally stops sampling, but the charge estimate, the charger status
+ * and the first reading after settling all come from samples. */
+static bool needs_samples(void) { return prev_vbus || settling(k_uptime_get()); }
 
 #if IS_ENABLED(CONFIG_SETTINGS)
 static void persist_cell_soc(struct k_work *work) {
@@ -114,32 +202,46 @@ static int batt_settings_set(const char *name, size_t len, settings_read_cb read
 SETTINGS_STATIC_HANDLER_DEFINE(zmk_batt, "zmk/batt", NULL, batt_settings_set, NULL, NULL);
 #endif
 
-#if OWN_BAS
-/* VBUS holds the cell at charge voltage, and lithium_ion_mv_to_pct maps
- * >= 4200 mV to 100%. Publish the last on-battery level instead while it is
- * present; with none known yet, the live reading is all there is. */
-static uint8_t own_bas_level(bool vbus) {
-    if (vbus && have_last_cell) {
-        return last_cell_soc;
-    }
-    return last_state_of_charge;
-}
-
-#if IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+#if OWN_BAS && IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
 static int published_charge_state = -1;
 
-static void publish_charge_state(bool vbus) {
-    int state =
-        vbus ? BT_BAS_BLS_CHARGE_STATE_CHARGING : BT_BAS_BLS_CHARGE_STATE_DISCHARGING_ACTIVE;
+/* On external power and not charging is "discharging, inactive" in BAS terms. */
+static void publish_charge_state(enum zmk_battery_charge_state state) {
+    int bls;
+
+    switch (state) {
+    case ZMK_BATTERY_CHARGE_STATE_CHARGING:
+        bls = BT_BAS_BLS_CHARGE_STATE_CHARGING;
+        break;
+    case ZMK_BATTERY_CHARGE_STATE_FULL:
+        bls = BT_BAS_BLS_CHARGE_STATE_DISCHARGING_INACTIVE;
+        break;
+    default:
+        bls = BT_BAS_BLS_CHARGE_STATE_DISCHARGING_ACTIVE;
+        break;
+    }
 
     /* Each set notifies and indicates, so only send changes. */
-    if (state != published_charge_state) {
-        published_charge_state = state;
-        bt_bas_bls_set_battery_charge_state(state);
+    if (bls != published_charge_state) {
+        published_charge_state = bls;
+        bt_bas_bls_set_battery_charge_state(bls);
     }
 }
+#endif // OWN_BAS && IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
+
+/* 1 charging, 0 charge complete, -1 without a charger status pin. */
+static int charger_charging(void) {
+#if defined(HAS_CHARGER_STATUS)
+    if (charger_status_ready) {
+        int value = gpio_pin_get_dt(&charger_status);
+
+        if (value >= 0) {
+            return value;
+        }
+    }
 #endif
-#endif // OWN_BAS
+    return -1;
+}
 
 #if DT_HAS_CHOSEN(zmk_battery)
 static const struct device *const battery = DEVICE_DT_GET(DT_CHOSEN(zmk_battery));
@@ -207,9 +309,16 @@ static int zmk_battery_update(const struct device *battery) {
 #error "Not a supported reporting fetch mode"
 #endif
 
-    if (last_state_of_charge != state_of_charge.val1) {
-        last_state_of_charge = state_of_charge.val1;
+    uint8_t old_reported = zmk_battery_reported_soc();
+    enum zmk_battery_charge_state old_state = charge_state;
+    bool live_changed = last_state_of_charge != state_of_charge.val1;
 
+    last_state_of_charge = state_of_charge.val1;
+    track_cell_level(last_state_of_charge, vbus_present(), charger_charging(), k_uptime_get());
+
+    /* Listeners read zmk_battery_reported_soc() too, so tell them when it or the
+     * charge state moves, not only when the live reading does. */
+    if (live_changed || zmk_battery_reported_soc() != old_reported || charge_state != old_state) {
         rc = raise_zmk_battery_state_changed(
             (struct zmk_battery_state_changed){.state_of_charge = last_state_of_charge});
 
@@ -218,14 +327,14 @@ static int zmk_battery_update(const struct device *battery) {
             return rc;
         }
     }
-    remember_cell_soc(last_state_of_charge);
 
 #if OWN_BAS
-    bool vbus = vbus_present();
-    uint8_t bas_level = own_bas_level(vbus);
+    /* On external power the live reading is charge voltage (lithium_ion_mv_to_pct
+     * maps >= 4200 mV to 100%), so publish the reported level instead. */
+    uint8_t bas_level = zmk_battery_reported_soc();
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_CHARGE_STATUS)
-    publish_charge_state(vbus);
+    publish_charge_state(charge_state);
 #endif
     if (bt_bas_get_battery_level() != bas_level) {
         LOG_DBG("Setting BAS GATT battery level to %d.", bas_level);
@@ -242,12 +351,15 @@ static int zmk_battery_update(const struct device *battery) {
     return rc;
 }
 
+static void stop_sampling_if_idle(void);
+
 static void zmk_battery_work(struct k_work *work) {
     int rc = zmk_battery_update(battery);
 
     if (rc != 0) {
         LOG_DBG("Failed to update battery value: %d.", rc);
     }
+    stop_sampling_if_idle();
 }
 
 K_WORK_DEFINE(battery_work, zmk_battery_work);
@@ -257,6 +369,12 @@ static void zmk_battery_timer(struct k_timer *timer) {
 }
 
 K_TIMER_DEFINE(battery_timer, zmk_battery_timer, NULL);
+
+static void stop_sampling_if_idle(void) {
+    if (!needs_samples() && zmk_activity_get_state() != ZMK_ACTIVITY_ACTIVE) {
+        k_timer_stop(&battery_timer);
+    }
+}
 
 #if POLL_VBUS
 #define VBUS_POLL_INTERVAL K_SECONDS(2)
@@ -273,7 +391,8 @@ static void vbus_poll(struct k_timer *timer) {
         return;
     }
     polled_vbus = vbus;
-    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &battery_work);
+    /* Sample now and keep sampling, even while idle (see needs_samples()). */
+    k_timer_start(&battery_timer, K_NO_WAIT, K_SECONDS(CONFIG_ZMK_BATTERY_REPORT_INTERVAL));
 #if IS_ENABLED(CONFIG_SETTINGS)
     if (vbus) {
         /* Keep the on-battery level across a reboot while plugged in. */
@@ -307,6 +426,14 @@ static int zmk_battery_init(void) {
         return -ENODEV;
     }
 
+#if defined(HAS_CHARGER_STATUS)
+    charger_status_ready = gpio_is_ready_dt(&charger_status) &&
+                           gpio_pin_configure_dt(&charger_status, GPIO_INPUT) == 0;
+    if (!charger_status_ready) {
+        LOG_WRN("Charger status pin not available; charging is assumed while powered");
+    }
+#endif
+
     zmk_battery_start_reporting();
 #if POLL_VBUS
     /* The first sample already sees the boot state; poll for later changes. */
@@ -319,16 +446,16 @@ static int zmk_battery_init(void) {
 static int battery_event_listener(const zmk_event_t *eh) {
 #if IS_ENABLED(CONFIG_ZMK_USB)
     if (as_zmk_usb_conn_state_changed(eh)) {
-        if (!zmk_usb_is_powered()) {
-            k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &battery_work);
-        } else {
 #if IS_ENABLED(CONFIG_SETTINGS)
+        if (zmk_usb_is_powered()) {
             /* USB events run on the system queue, which Bluetooth needs while
              * settings_load() owns the settings lock. Save on the battery queue
              * so waiting for that lock cannot stall HCI command processing. */
             k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &persist_cell_soc_work);
-#endif
         }
+#endif
+        /* Sample now and keep sampling, even while idle (see needs_samples()). */
+        zmk_battery_start_reporting();
         return 0;
     }
 #endif
@@ -340,7 +467,7 @@ static int battery_event_listener(const zmk_event_t *eh) {
             return 0;
         case ZMK_ACTIVITY_IDLE:
         case ZMK_ACTIVITY_SLEEP:
-            k_timer_stop(&battery_timer);
+            stop_sampling_if_idle();
             return 0;
         default:
             break;

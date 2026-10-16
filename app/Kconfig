@@ -412,6 +412,24 @@ config ZMK_BATTERY_CHARGE_STATUS
       (USB power) and "discharging" otherwise. On a split central that proxies
       peripheral battery levels, it carries the peripheral's charge state
       instead, and the central subscribes to the peripheral's status.
+      With a zmk,battery-charger status pin, a finished charge is published as
+      "discharging, inactive" (on external power, not charging).
+
+config ZMK_BATTERY_CHARGE_STATE_API
+    def_bool y
+    help
+      Marks that zmk_battery_reported_soc() and zmk_battery_charge_state() exist,
+      so external modules can use them when built against this ZMK.
+
+config ZMK_BATTERY_SETTLE_AFTER_CHARGE_SEC
+    int "Seconds to keep the charged level after external power is removed"
+    default 0
+    help
+      Right after charging, the cell voltage is still raised and reads several
+      percent high for a few minutes. For this long after external power is
+      removed, keep reporting the level known at unplug (the last measured or
+      estimated level, or 100 when the charger finished) instead of the live
+      reading. 0 reports live readings straight away.
 
 endif # ZMK_BATTERY_REPORTING
 

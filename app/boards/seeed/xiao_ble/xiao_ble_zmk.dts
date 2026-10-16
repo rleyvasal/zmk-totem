@@ -13,6 +13,17 @@ sd_partition: &reserved_partition_0 { };
 / {
     chosen {
         zmk,battery = &vbatt;
+        zmk,battery-charger = &xiao_charger;
+    };
+
+    /* BQ25101: CHG pulls P0.17 low while charging. It charges at 50 mA unless
+     * P0.13 is driven low (100 mA), which ZMK does not do. A keyboard adds its
+     * battery's charge-full-design-microamp-hours to get a charging estimate.
+     */
+    xiao_charger: xiao_charger {
+        compatible = "zmk,battery-charger";
+        status-gpios = <&gpio0 17 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        charge-current-microamp = <50000>;
     };
 
     vbatt: vbatt {

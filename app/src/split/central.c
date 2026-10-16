@@ -29,7 +29,7 @@ const struct zmk_split_transport_central *active_transport;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 
 static uint8_t peripheral_battery_levels[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT] = {0};
-static bool peripheral_battery_charging[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
+static uint8_t peripheral_battery_charge_states[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
 
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 
@@ -70,18 +70,21 @@ int zmk_split_transport_central_peripheral_event_handler(
         return raise_zmk_peripheral_battery_state_changed(battery_ev);
     }
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_CHARGING_EVENT: {
-        bool charging = ev.data.battery_charging_event.charging;
+        uint8_t state = ev.data.battery_charging_event.charging;
 
-        if (source >= ARRAY_SIZE(peripheral_battery_charging)) {
+        if (source >= ARRAY_SIZE(peripheral_battery_charge_states)) {
             return -EINVAL;
         }
-        if (peripheral_battery_charging[source] == charging) {
+        if (peripheral_battery_charge_states[source] == state) {
             return 0;
         }
-        peripheral_battery_charging[source] = charging;
+        peripheral_battery_charge_states[source] = state;
         return raise_zmk_peripheral_battery_charging_changed(
-            (struct zmk_peripheral_battery_charging_changed){.source = source,
-                                                             .charging = charging});
+            (struct zmk_peripheral_battery_charging_changed){
+                .source = source,
+                .charging = state != ZMK_BATTERY_CHARGE_STATE_DISCHARGING,
+                .full = state == ZMK_BATTERY_CHARGE_STATE_FULL,
+            });
     }
 #endif
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_SENSOR_EVENT: {
@@ -182,12 +185,13 @@ int zmk_split_central_get_peripheral_battery_level(uint8_t source, uint8_t *leve
     return 0;
 }
 
-int zmk_split_central_get_peripheral_battery_charging(uint8_t source, bool *charging) {
-    if (source >= ARRAY_SIZE(peripheral_battery_charging)) {
+int zmk_split_central_get_peripheral_battery_charge_state(uint8_t source,
+                                                          enum zmk_battery_charge_state *state) {
+    if (source >= ARRAY_SIZE(peripheral_battery_charge_states)) {
         return -EINVAL;
     }
 
-    *charging = peripheral_battery_charging[source];
+    *state = peripheral_battery_charge_states[source];
     return 0;
 }
 

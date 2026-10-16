@@ -61,6 +61,7 @@ struct zmk_split_transport_peripheral_event {
         } battery_event;
 
         struct {
+            /* enum zmk_battery_charge_state: 0 discharging, 1 charging, 2 full */
             uint8_t charging;
         } battery_charging_event;
     } data;

@@ -29,6 +29,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/sensor_event.h>
+#include <zmk/battery.h>
 #include <zmk/events/battery_state_changed.h>
 #include <zmk/pointing/input_split.h>
 #include <zmk/hid_indicators_types.h>
@@ -228,7 +229,8 @@ int release_peripheral_slot(int index) {
     struct peripheral_event_wrapper charging_ev = {
         .source = index,
         .event = {.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_CHARGING_EVENT,
-                  .data = {.battery_charging_event = {.charging = false}}}};
+                  .data = {.battery_charging_event = {.charging =
+                                                          ZMK_BATTERY_CHARGE_STATE_DISCHARGING}}}};
 
     k_msgq_put(&peripheral_event_msgq, &charging_ev, K_NO_WAIT);
     k_work_submit(&peripheral_event_work);
@@ -503,26 +505,35 @@ static uint8_t split_central_battery_level_read_func(struct bt_conn *conn, uint8
 #if CENTRAL_BATT_STATUS
 
 /* Battery Level Status (0x2BED): a flags byte, then a little-endian Power State
- * whose bits 5-6 are the Battery Charge State (1 = charging). */
-static int batt_status_charging(const uint8_t *data, uint16_t length) {
+ * whose bits 5-6 are the Battery Charge State: 1 charging, 2 discharging,
+ * 3 discharging inactive (on external power and not charging: full). Returns
+ * an enum zmk_battery_charge_state, or -EINVAL. */
+static int batt_status_charge_state(const uint8_t *data, uint16_t length) {
     if (data == NULL || length < 3) {
         return -EINVAL;
     }
 
     uint16_t power_state = data[1] | (data[2] << 8);
 
-    return ((power_state >> 5) & 0x3) == 1;
+    switch ((power_state >> 5) & 0x3) {
+    case 1:
+        return ZMK_BATTERY_CHARGE_STATE_CHARGING;
+    case 3:
+        return ZMK_BATTERY_CHARGE_STATE_FULL;
+    default:
+        return ZMK_BATTERY_CHARGE_STATE_DISCHARGING;
+    }
 }
 
 static void report_batt_status(struct bt_conn *conn, const void *data, uint16_t length) {
-    int charging = batt_status_charging(data, length);
+    int charging = batt_status_charge_state(data, length);
 
     if (charging < 0) {
         LOG_WRN("Malformed battery level status (%u bytes)", length);
         return;
     }
 
-    LOG_DBG("Peripheral charging: %d", charging);
+    LOG_DBG("Peripheral charge state: %d", charging);
 
     struct peripheral_event_wrapper ev = {
         .source = peripheral_slot_index_for_conn(conn),

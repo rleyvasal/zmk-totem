@@ -14,6 +14,18 @@ HARNESS = r"""
 #define IS_ENABLED(x) x
 #define CONFIG_ZMK_USB 1
 #define NRF_POWER_HAS_USBREG 1
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define CHARGE_CURRENT_UA 0
+#define BATTERY_CAPACITY_UAH 0
+#define SETTLE_AFTER_CHARGE_MS 0
+enum zmk_battery_charge_state {
+    ZMK_BATTERY_CHARGE_STATE_DISCHARGING,
+    ZMK_BATTERY_CHARGE_STATE_CHARGING,
+    ZMK_BATTERY_CHARGE_STATE_FULL,
+};
+static int64_t now_ms;
+static int64_t k_uptime_get(void) { return now_ms; }
+static uint8_t last_state_of_charge;
 typedef int NRF_POWER_Type;
 static NRF_POWER_Type power_regs;
 #define NRF_POWER (&power_regs)
@@ -26,9 +38,20 @@ static bool zmk_usb_is_powered(void) { return usb_reported_powered; }
 static uint8_t last_cell_soc;
 static bool have_last_cell;
 /* ACTUAL_REMEMBER */
+static void remember_cell_soc(uint8_t live) {
+    now_ms += 60000;
+    last_state_of_charge = live;
+    track_cell_level(live, vbus_present(), -1, now_ms);
+}
 static void boot(bool persisted, uint8_t persisted_soc) {
     have_last_cell = persisted;
     last_cell_soc = persisted ? persisted_soc : 0;
+    prev_vbus = false;
+    unplugged_seen = false;
+    charge_start_soc = -1;
+    (void)zmk_battery_charge_state;
+    (void)zmk_battery_reported_soc;
+    (void)needs_samples;
     /* The USB stack has not reported yet: usb_status is still USB_DC_UNKNOWN. */
     usb_reported_powered = false;
 }
