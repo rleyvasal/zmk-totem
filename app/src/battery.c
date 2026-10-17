@@ -96,6 +96,7 @@ static bool unplugged_seen;
 static int64_t unplugged_at;
 static int64_t charge_start_at;
 static int charge_start_soc = -1;
+static bool charged_since_plugged;
 
 /* Level after charging for elapsed_ms from start_soc at current_ua into a
  * capacity_uah cell, or -1 if any of those is unknown. Held below 100 until
@@ -134,6 +135,9 @@ static void track_cell_level(uint8_t live_soc, bool vbus, int charger, int64_t n
         return;
     }
 
+    if (!prev_vbus) {
+        charged_since_plugged = false;
+    }
     if (!prev_vbus || (charge_start_soc < 0 && have_last_cell)) {
         /* Plugged in, or the persisted level arrived after the first sample. */
         charge_start_at = now;
@@ -142,10 +146,19 @@ static void track_cell_level(uint8_t live_soc, bool vbus, int charger, int64_t n
     prev_vbus = true;
 
     if (charger == 0) {
+        /* Not charging on external power. That is a finished charge only if
+         * one ran since plugging in: chargers also stay idle when plugged in
+         * above their recharge threshold (about 4.1 V, over 90%), and then the
+         * last level is still the best one. */
         charge_state = ZMK_BATTERY_CHARGE_STATE_FULL;
-        last_cell_soc = 100;
-        have_last_cell = true;
+        if (charged_since_plugged) {
+            last_cell_soc = 100;
+            have_last_cell = true;
+        }
         return;
+    }
+    if (charger == 1) {
+        charged_since_plugged = true;
     }
     charge_state = ZMK_BATTERY_CHARGE_STATE_CHARGING;
 

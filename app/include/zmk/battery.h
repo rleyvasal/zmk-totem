@@ -13,7 +13,8 @@ enum zmk_battery_charge_state {
     ZMK_BATTERY_CHARGE_STATE_DISCHARGING,
     /* On external power and charging (or no charger status to say otherwise). */
     ZMK_BATTERY_CHARGE_STATE_CHARGING,
-    /* On external power and the charger reports the charge complete. */
+    /* On external power and the charger is not charging: the charge is complete,
+     * or the cell was above the charger's recharge threshold when plugged in. */
     ZMK_BATTERY_CHARGE_STATE_FULL,
 };
 
@@ -22,7 +23,7 @@ uint8_t zmk_battery_state_of_charge(void);
 
 /* Best known level of the cell, -1 if never known: the last reading on battery,
  * then while charging an estimate (with a zmk,battery-charger current and
- * capacity) or 100 once the charger reports full. */
+ * capacity) or 100 once a charge since plugging in has completed. */
 int zmk_battery_last_cell_soc(void);
 
 /* The level to show for this half: the live reading on battery, but the cell

@@ -51,6 +51,7 @@ static void reset(void) {
     prev_vbus = false;
     unplugged_seen = false;
     charge_start_soc = -1;
+    charged_since_plugged = false;
     charge_state = ZMK_BATTERY_CHARGE_STATE_DISCHARGING;
 }
 #define EXPECT(cond)                                                                               \
@@ -101,6 +102,19 @@ int main(void) {
     } else {
         EXPECT(last_cell_soc == 99 && zmk_battery_reported_soc() == 99 && !needs_samples());
     }
+
+    /* Plugged in at 93% (4.145 V, above the charger's ~4.1 V recharge
+     * threshold): the charger never starts. Not charging, but not 100 either. */
+    reset();
+    sample(0, 93, false, 1);
+    sample(1 * MIN_, 100, true, 0);
+    EXPECT(charge_state == ZMK_BATTERY_CHARGE_STATE_FULL && last_cell_soc == 93);
+    EXPECT(zmk_battery_reported_soc() == 93);
+    sample(30 * MIN_, 100, true, 0);
+    EXPECT(last_cell_soc == 93); /* No estimate while not charging. */
+    sample(40 * MIN_, 100, true, 1); /* Drained to the threshold: it charges... */
+    sample(70 * MIN_, 100, true, 0); /* ...and finishes. */
+    EXPECT(charge_state == ZMK_BATTERY_CHARGE_STATE_FULL && last_cell_soc == 100);
 
     /* No charger status pin (-1): charging is assumed, never full. */
     reset();
