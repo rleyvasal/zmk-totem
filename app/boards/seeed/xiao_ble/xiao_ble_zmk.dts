@@ -16,13 +16,17 @@ sd_partition: &reserved_partition_0 { };
         zmk,battery-charger = &xiao_charger;
     };
 
-    /* BQ25101: CHG pulls P0.17 low while charging. It charges at 50 mA unless
-     * P0.13 is driven low (100 mA), which ZMK does not do. A keyboard adds its
-     * battery's charge-full-design-microamp-hours to get a charging estimate.
+    /* BQ25101: charges at 50 mA unless P0.13 is driven low (100 mA), which ZMK
+     * does not do. A keyboard adds its battery's charge-full-design-microamp-hours
+     * to get a charging estimate.
+     *
+     * No status-gpios: Seeed documents P0.17 as low while charging, but on a
+     * XIAO nRF52840 Sense it read "not charging" while the cell charged from
+     * 4.03 V to 4.21 V (2026-10-16). Without it, charging is assumed while USB
+     * is present, and the level rises by the estimate up to 99.
      */
     xiao_charger: xiao_charger {
         compatible = "zmk,battery-charger";
-        status-gpios = <&gpio0 17 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
         charge-current-microamp = <50000>;
     };
 
